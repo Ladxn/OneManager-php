@@ -63,17 +63,23 @@ function getGET()
 }
 
 function ReplitAPI($op, $key, $value = '') {
-  //error_log1($op . '_' . $key . '_' . $value);
-  $apiurl = getenv('REPLIT_DB_URL');
-  if ($op === 'r') {
-    return curl('GET', $apiurl . '/' . $key);
-  } elseif ($op === 'w') {
-    return curl('POST', $apiurl, $key . '=' . $value, ["Content-Type"=>"application/x-www-form-urlencoded"]);
-  } elseif ($op === 'd') {
-    return curl('DELETE', $apiurl . '/' . $key);
-  } else {
-    return ['stat'=>500, 'body'=>'error option input to function ReplitAPI().'];
-  }
+    //error_log1($op . '_' . $key . '_' . $value);
+    $apiurl = getenv('REPLIT_DB_URL');
+    if ($op === 'r') {
+        if (!($config = getcache('REPLIT_CONFIG'))) {
+            $config = json_decode(curl('GET', $apiurl . '/REPLIT_CONFIG')['body'], true);
+            savecache('REPLIT_CONFIG', $config);
+        }
+        return ['stat'=>200, 'body'=>$config[$key]];
+    } elseif ($op === 'w') {
+        savecache('REPLIT_CONFIG', null, '', 0);
+        return curl('POST', $apiurl, 'REPLIT_CONFIG=' . $value, ["Content-Type"=>"application/x-www-form-urlencoded"]);
+    } elseif ($op === 'd') {
+        // not use
+        return curl('DELETE', $apiurl . '/' . $key);
+    } else {
+        return ['stat'=>500, 'body'=>'error option input to function ReplitAPI().'];
+    }
 }
 
 function getConfig($str, $disktag = '')
@@ -84,7 +90,7 @@ function getConfig($str, $disktag = '')
         if (isset($env[$str])) {
             if (isBase64Env($str)) return base64y_decode($env[$str]);
             else return $env[$str];
-	}
+        }
     } else {
         if (isBase64Env($str)) return base64y_decode(ReplitAPI('r', $str)['body']);
         else return ReplitAPI('r', $str)['body'];
@@ -94,42 +100,50 @@ function getConfig($str, $disktag = '')
 
 function setConfig($arr, $disktag = '')
 {
+    if (!($envs = getcache('REPLIT_CONFIG'))) {
+        $envs = json_decode(curl('GET', getenv('REPLIT_DB_URL') . '/REPLIT_CONFIG')['body'], true);
+        savecache('REPLIT_CONFIG', $envs);
+    }
     if ($disktag=='') $disktag = $_SERVER['disktag'];
     $disktags = explode("|", getConfig('disktag'));
-    if ($disktag!='') $diskconfig = json_decode(ReplitAPI('r', $disktag)['body'], true);
-    $tmp = [];
     $indisk = 0;
     $operatedisk = 0;
     foreach ($arr as $k => $v) {
         if (isCommonEnv($k)) {
-            if (isBase64Env($k)) $tmp[$k] = base64y_encode($v);
-            else $tmp[$k] = $v;
+            if (isBase64Env($k)) $envs[$k] = base64y_encode($v);
+            else $envs[$k] = $v;
         } elseif (isInnerEnv($k)) {
-            if (isBase64Env($k)) $diskconfig[$k] = base64y_encode($v);
-            else $diskconfig[$k] = $v;
+            if (isBase64Env($k)) $envs[$disktag][$k] = base64y_encode($v);
+            else $envs[$disktag][$k] = $v;
             $indisk = 1;
         } elseif ($k=='disktag_add') {
             array_push($disktags, $v);
             $operatedisk = 1;
         } elseif ($k=='disktag_del') {
             $disktags = array_diff($disktags, [ $v ]);
-            $tmp[$v] = '';
+            $envs[$v] = '';
             $operatedisk = 1;
         } elseif ($k=='disktag_copy') {
             $newtag = $v . '_' . date("Ymd_His");
-            $tmp[$newtag] = getConfig($v);
+            $envs[$newtag] = $envs[$v];
             array_push($disktags, $newtag);
             $operatedisk = 1;
         } elseif ($k=='disktag_rename' || $k=='disktag_newname') {
             if ($arr['disktag_rename']!=$arr['disktag_newname']) $operatedisk = 1;
         } else {
-            $tmp[$k] = json_encode($v);
+            //$tmpdisk = json_decode($v, true);
+            //var_dump($tmpdisk);
+            //error_log(json_encode($tmpdisk));
+            //if ($tmpdisk===null) 
+            $envs[$k] = $v;
+            //else $envs[$k] = $tmpdisk;
         }
     }
     if ($indisk) {
+        $diskconfig = $envs[$disktag];
         $diskconfig = array_filter($diskconfig, 'array_value_isnot_null');
         ksort($diskconfig);
-        $tmp[$disktag] = json_encode($diskconfig);
+        $envs[$disktag] = $diskconfig;
     }
     if ($operatedisk) {
         if (isset($arr['disktag_newname']) && $arr['disktag_newname']!='') {
@@ -138,23 +152,20 @@ function setConfig($arr, $disktag = '')
                 if ($tag==$arr['disktag_rename']) array_push($tags, $arr['disktag_newname']);
                 else array_push($tags, $tag);
             }
-            $tmp['disktag'] = implode('|', $tags);
-            $tmp[$arr['disktag_newname']] = getConfig($arr['disktag_rename']);
-            $tmp[$arr['disktag_rename']] = null;
+            $envs['disktag'] = implode('|', $tags);
+            $envs[$arr['disktag_newname']] = $envs[$arr['disktag_rename']];
+            unset($envs[$arr['disktag_rename']]);
         } else {
             $disktags = array_unique($disktags);
             foreach ($disktags as $disktag) if ($disktag!='') $disktag_s .= $disktag . '|';
-            if ($disktag_s!='') $tmp['disktag'] = substr($disktag_s, 0, -1);
-            else $tmp['disktag'] = null;
+            if ($disktag_s!='') $envs['disktag'] = substr($disktag_s, 0, -1);
+            else $envs['disktag'] = '';
         }
     }
-    $response = null;
-    foreach ($tmp as $key => $val) {
-      if (!!$val) $response = ReplitAPI('w', $key, $val);
-      else $response = ReplitAPI('d', $key);
-      if (api_error($response)) return ['stat'=>$response['stat'], 'body'=>$response['body'] . "<br>\nError in writting " . $key . "=" . $val];
-    }
-    //error_log1(json_encode($arr, JSON_PRETTY_PRINT) . ' => tmp：' . json_encode($tmp, JSON_PRETTY_PRINT));
+    $envs = array_filter($envs, 'array_value_isnot_null');
+    $response = ReplitAPI('w', 'REPLIT_CONFIG', json_encode($envs));
+    //error_log1(json_encode($arr, JSON_PRETTY_PRINT) . ' => tmp：' . json_encode($envs, JSON_PRETTY_PRINT));
+    if (api_error($response)) return ['stat'=>$response['stat'], 'body'=>$response['body'] . "<br>\nError in writting " . $key . "=" . $val];
     return $response;
 }
 
@@ -184,12 +195,12 @@ function install()
         }
     }
     if ($_GET['install1']) {
-        if (!ConfigWriteable()) {
+        /*if (!ConfigWriteable()) {
             $html .= getconstStr('MakesuerWriteable');
             $title = 'Error';
             return message($html, $title, 201);
         }
-        /*if (!RewriteEngineOn()) {
+        if (!RewriteEngineOn()) {
             $html .= getconstStr('MakesuerRewriteOn');
             $title = 'Error';
             return message($html, $title, 201);
@@ -286,7 +297,7 @@ function ConfigWriteable()
 
 function api_error($response)
 {
-  return !($response['stat']==200||$response['stat']==204||$response['stat']==404);
+    return !($response['stat']==200||$response['stat']==204||$response['stat']==404);
     //return isset($response['message']);
 }
 
@@ -298,7 +309,7 @@ function api_error_msg($response)
 
 function setConfigResponse($response)
 {
-  return $response;
+    return $response;
     //return json_decode($response, true);
 }
 
